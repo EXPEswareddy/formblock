@@ -1,48 +1,88 @@
-import {
-  createButton, createFieldWrapper, createLabel, getHTMLRenderType,
-  createHelpText,
-  getId,
-  stripTags,
-  checkValidation,
-  toClassName,
-  getSitePageName,
-} from './util.js';
-import GoogleReCaptcha from './integrations/recaptcha.js';
-import componentDecorator from './mappings.js';
-import DocBasedFormToAF from './transform.js';
-import transferRepeatableDOM from './components/repeat/repeat.js';
-import { handleSubmit } from './submit.js';
-import { getSubmitBaseUrl, emailPattern } from './constant.js';
+/* eslint-disable linebreak-style */
+import { sampleRUM } from '../../scripts/lib-franklin.js';
+import decorateFieldset from './fieldset.js';
 
-export const DELAY_MS = 0;
-let captchaField;
-let afModule;
+function generateUnique() {
+  return new Date().valueOf() + Math.random();
+}
 
-const withFieldWrapper = (element) => (fd) => {
-  const wrapper = createFieldWrapper(fd);
-  wrapper.append(element(fd));
-  return wrapper;
-};
+function constructPayload(form) {
+  const payload = { __id__: generateUnique() };
+  [...form.elements].forEach((fe) => {
+    if (fe.name) {
+      if (fe.type === 'radio') {
+        if (fe.checked) payload[fe.name] = fe.value;
+      } else if (fe.type === 'checkbox') {
+        if (fe.checked) payload[fe.name] = payload[fe.name] ? `${payload[fe.name]},${fe.value}` : fe.value;
+      } else if (fe.type !== 'file') {
+        payload[fe.name] = fe.value;
+      }
+    }
+  });
+  return { payload };
+}
+
+async function submissionFailure(error, form) {
+  alert(error); // TODO define error mechansim
+  form.setAttribute('data-submitting', 'false');
+  form.querySelector('button[type="submit"]').disabled = false;
+}
+
+async function prepareRequest(form) {
+  const { payload } = constructPayload(form);
+  const headers = {
+    'Content-Type': 'application/json',
+  };
+  const body = JSON.stringify({ data: payload });
+  const url = form.dataset.action;
+  return { headers, body, url };
+}
+
+async function submitForm(form) {
+  try {
+    const { headers, body, url } = await prepareRequest(form);
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body,
+    });
+    if (response.ok) {
+      sampleRUM('form:submit');
+      window.location.href = '/thankyou.html';
+    } else {
+      const error = await response.text();
+      throw new Error(error);
+    }
+  } catch (error) {
+    submissionFailure(error, form);
+  }
+}
+
+async function handleSubmit(form) {
+  if (form.getAttribute('data-submitting') !== 'true') {
+    form.setAttribute('data-submitting', 'true');
+    await submitForm(form);
+  }
+}
 
 function setPlaceholder(element, fd) {
-  if (fd.placeholder) {
-    element.setAttribute('placeholder', fd.placeholder);
+  if (fd.Placeholder) {
+    element.setAttribute('placeholder', fd.Placeholder);
   }
 }
 
 const constraintsDef = Object.entries({
-  'password|tel|email|text': [['maxLength', 'maxlength'], ['minLength', 'minlength'], 'pattern'],
-  'number|range|date': [['maximum', 'Max'], ['minimum', 'Min'], 'step'],
-  file: ['accept', 'Multiple'],
-  panel: [['maxOccur', 'data-max'], ['minOccur', 'data-min']],
+  'email|text': [['Max', 'maxlength'], ['Min', 'minlength']],
+  'number|range|date': ['Max', 'Min', 'Step'],
+  file: ['Accept', 'Multiple'],
+  fieldset: ['Max', 'Min'],
 }).flatMap(([types, constraintDef]) => types.split('|')
   .map((type) => [type, constraintDef.map((cd) => (Array.isArray(cd) ? cd : [cd, cd]))]));
 
 const constraintsObject = Object.fromEntries(constraintsDef);
 
 function setConstraints(element, fd) {
-  const renderType = getHTMLRenderType(fd);
-  const constraints = constraintsObject[renderType];
+  const constraints = constraintsObject[fd.Type];
   if (constraints) {
     constraints
       .filter(([nm]) => fd[nm])
@@ -52,13 +92,111 @@ function setConstraints(element, fd) {
   }
 }
 
+function createLabel(fd, tagName = 'label') {
+  const label = document.createElement(tagName);
+  label.setAttribute('for', fd.Id);
+  label.className = 'field-label';
+  label.textContent = fd.Label || '';
+  if (fd.Tooltip) {
+    label.title = fd.Tooltip;
+  }
+  return label;
+}
+
+function createHelpText(fd) {
+  const div = document.createElement('div');
+  div.className = 'field-description';
+  div.setAttribute('aria-live', 'polite');
+  div.innerText = fd.Description;
+  div.id = `${fd.Id}-description`;
+  return div;
+}
+
+function createFieldWrapper(fd, tagName = 'div') {
+  const fieldWrapper = document.createElement(tagName);
+  const nameStyle = fd.Name ? ` form-${fd.Name}` : '';
+  const fieldId = `form-${fd.Type}-wrapper${nameStyle}`;
+  fieldWrapper.className = fieldId;
+  if (fd.Fieldset) {
+    fieldWrapper.dataset.fieldset = fd.Fieldset;
+  }
+  if (fd.Mandatory.toLowerCase() === 'true') {
+    fieldWrapper.dataset.required = '';
+  }
+  fieldWrapper.classList.add('field-wrapper');
+  fieldWrapper.append(createLabel(fd));
+  return fieldWrapper;
+}
+
+function createButton(fd) {
+  const wrapper = createFieldWrapper(fd);
+  const button = document.createElement('button');
+  button.textContent = fd.Label;
+  button.type = fd.Type;
+  button.classList.add('btn-info');
+  button.classList.add('btn');
+  button.classList.add('btn-lg');
+  button.dataset.redirect = fd.Extra || '';
+  button.id = fd.Id;
+  button.name = fd.Name;
+  button.addEventListener("click", nextFunc);
+  wrapper.replaceChildren(button);
+  return wrapper;
+}
+
+// let currentFieldsetIndex = 0;
+// function nextFunc(){
+//   console.log("clicked");
+//   const fieldsets = document.querySelectorAll('fieldset');
+//   fieldsets[currentFieldsetIndex].classList.remove('active');
+//   currentFieldsetIndex++;
+//   if(currentFieldsetIndex >= fieldsets.length){
+//     currentFieldsetIndex=0;
+//   }
+//   fieldsets[currentFieldsetIndex].classList.add('active');
+// }
+let currentFieldsetIndex = 0;
+
+function nextFunc() {
+  const fieldsets = document.querySelectorAll('fieldset');
+  fieldsets[currentFieldsetIndex].classList.remove('active');
+  // eslint-disable-next-line no-plusplus
+  currentFieldsetIndex++;
+  if (currentFieldsetIndex >= fieldsets.length) {
+    currentFieldsetIndex = 0;
+  }
+  fieldsets[currentFieldsetIndex].classList.add('active');
+  // Check if the current fieldset is the last one and show the separate div if it is
+  if (isLastFieldset(fieldsets[currentFieldsetIndex])) {
+    document.getElementById('submit').style.display = 'block';
+  } else {
+    document.getElementById('submit').style.display = 'none';
+  }
+}
+
+function isLastFieldset(fieldset) {
+  const fieldsets = document.querySelectorAll('fieldset');
+  return fieldset === fieldsets[fieldsets.length - 1];
+}
+
+function createSubmit(fd) {
+  const wrapper = createButton(fd);
+  return wrapper;
+}
+
 function createInput(fd) {
   const input = document.createElement('input');
-  input.type = getHTMLRenderType(fd);
+  input.type = fd.Type;
   setPlaceholder(input, fd);
   setConstraints(input, fd);
   return input;
 }
+
+const withFieldWrapper = (element) => (fd) => {
+  const wrapper = createFieldWrapper(fd);
+  wrapper.append(element(fd));
+  return wrapper;
+};
 
 const createTextArea = withFieldWrapper((fd) => {
   const input = document.createElement('textarea');
@@ -68,81 +206,43 @@ const createTextArea = withFieldWrapper((fd) => {
 
 const createSelect = withFieldWrapper((fd) => {
   const select = document.createElement('select');
-  select.required = fd.required;
-  select.title = fd.tooltip ? stripTags(fd.tooltip, '') : '';
-  select.readOnly = fd.readOnly;
-  select.multiple = fd.type === 'string[]' || fd.type === 'boolean[]' || fd.type === 'number[]';
-  let ph;
-  if (fd.placeholder) {
-    ph = document.createElement('option');
-    ph.textContent = fd.placeholder;
+  if (fd.Placeholder) {
+    const ph = document.createElement('option');
+    ph.textContent = fd.Placeholder;
+    ph.setAttribute('selected', '');
     ph.setAttribute('disabled', '');
-    ph.setAttribute('value', '');
     select.append(ph);
   }
-  let optionSelected = false;
-
-  const addOption = (label, value) => {
+  fd.Options.split(',').forEach((o) => {
     const option = document.createElement('option');
-    option.textContent = label instanceof Object ? label?.value?.trim() : label?.trim();
-    option.value = value?.trim() || label?.trim();
-    if (fd.value === option.value || (Array.isArray(fd.value) && fd.value.includes(option.value))) {
-      option.setAttribute('selected', '');
-      optionSelected = true;
-    }
+    option.textContent = o.trim();
+    option.value = o.trim();
     select.append(option);
-    return option;
-  };
-
-  const options = fd?.enum || [];
-  const optionNames = fd?.enumNames ?? options;
-
-  if (options.length === 1
-    && options?.[0]?.startsWith('https://')) {
-    const optionsUrl = new URL(options?.[0]);
-    // using async to avoid rendering
-    if (optionsUrl.hostname.endsWith('hlx.page')
-    || optionsUrl.hostname.endsWith('hlx.live')) {
-      fetch(`${optionsUrl.pathname}${optionsUrl.search}`)
-        .then(async (response) => {
-          const json = await response.json();
-          const values = [];
-          json.data.forEach((opt) => {
-            addOption(opt.Option, opt.Value);
-            values.push(opt.Value || opt.Option);
-          });
-        });
-    }
-  } else {
-    options.forEach((value, index) => addOption(optionNames?.[index], value));
-  }
-
-  if (ph && optionSelected === false) {
-    ph.setAttribute('selected', '');
-  }
+  });
   return select;
 });
 
-function createHeading(fd) {
+function createRadio(fd) {
   const wrapper = createFieldWrapper(fd);
-  const heading = document.createElement('h2');
-  heading.textContent = fd.value || fd.label.value;
-  heading.id = fd.id;
-  wrapper.append(heading);
-
+  wrapper.insertAdjacentElement('afterbegin', createInput(fd));
   return wrapper;
 }
 
-function createRadioOrCheckbox(fd) {
-  const wrapper = createFieldWrapper(fd);
-  const input = createInput(fd);
-  const [value, uncheckedValue] = fd.enum || [];
-  input.value = value;
-  if (typeof uncheckedValue !== 'undefined') {
-    input.dataset.uncheckedValue = uncheckedValue;
-  }
-  wrapper.insertAdjacentElement('afterbegin', input);
-  return wrapper;
+const createOutput = withFieldWrapper((fd) => {
+  const output = document.createElement('output');
+  output.name = fd.Name;
+  output.dataset.fieldset = fd.Fieldset ? fd.Fieldset : '';
+  output.innerText = fd.Value;
+  return output;
+});
+
+function createHidden(fd) {
+  const input = document.createElement('input');
+  input.type = 'hidden';
+  input.id = fd.Id;
+  input.name = fd.Name;
+  input.value = fd.Value;
+  return input;
 }
 
 function createLegend(fd) {
@@ -150,183 +250,60 @@ function createLegend(fd) {
 }
 
 function createFieldSet(fd) {
-  const wrapper = createFieldWrapper(fd, 'fieldset', createLegend);
-  wrapper.id = fd.id;
-  wrapper.name = fd.name;
-  if (fd.fieldType === 'panel') {
-    wrapper.classList.add('panel-wrapper');
-  }
-  if (fd.repeatable === true) {
+  const wrapper = createFieldWrapper(fd, 'fieldset');
+  wrapper.name = fd.Name;
+  wrapper.replaceChildren(createLegend(fd));
+  if (fd.Repeatable && fd.Repeatable.toLowerCase() === 'true') {
     setConstraints(wrapper, fd);
-    wrapper.dataset.repeatable = true;
-    wrapper.dataset.index = fd.index || 0;
+    wrapper.dataset.repeatable = 'true';
   }
   return wrapper;
 }
 
-function setConstraintsMessage(field, messages = {}) {
-  Object.keys(messages).forEach((key) => {
-    field.dataset[`${key}ErrorMessage`] = messages[key];
-  });
-}
-
-function createRadioOrCheckboxGroup(fd) {
-  const wrapper = createFieldSet({ ...fd });
-  const type = fd.fieldType.split('-')[0];
-  fd.enum.forEach((value, index) => {
-    const label = (typeof fd.enumNames?.[index] === 'object' && fd.enumNames?.[index] !== null) ? fd.enumNames[index].value : fd.enumNames?.[index] || value;
-    const id = getId(fd.name);
-    const field = createRadioOrCheckbox({
-      name: fd.name,
-      id,
-      label: { value: label },
-      fieldType: type,
-      enum: [value],
-      required: fd.required,
+function groupFieldsByFieldSet(form) {
+  const fieldsets = form.querySelectorAll('fieldset');
+  fieldsets?.forEach((fieldset) => {
+    const fields = form.querySelectorAll(`[data-fieldset="${fieldset.name}"`);
+    fields?.forEach((field) => {
+      fieldset.append(field);
     });
-    field.classList.remove('field-wrapper', `field-${toClassName(fd.name)}`);
-    const input = field.querySelector('input');
-    input.id = id;
-    input.dataset.fieldType = fd.fieldType;
-    input.name = fd.name;
-    input.checked = Array.isArray(fd.value) ? fd.value.includes(value) : value === fd.value;
-    if ((index === 0 && type === 'radio') || type === 'checkbox') {
-      input.required = fd.required;
-    }
-    if (fd.enabled === false || fd.readOnly === true) {
-      input.setAttribute('disabled', 'disabled');
-    }
-    wrapper.appendChild(field);
   });
-  wrapper.dataset.required = fd.required;
-  if (fd.tooltip) {
-    wrapper.title = stripTags(fd.tooltip, '');
-  }
-  setConstraintsMessage(wrapper, fd.constraintMessages);
-  return wrapper;
 }
 
 function createPlainText(fd) {
   const paragraph = document.createElement('p');
-  if (fd.richText) {
-    paragraph.innerHTML = stripTags(fd.value);
-  } else {
-    paragraph.textContent = fd.value;
-  }
-  const wrapper = createFieldWrapper(fd);
-  wrapper.id = fd.id;
-  wrapper.replaceChildren(paragraph);
-  return wrapper;
+  const nameStyle = fd.Name ? `form-${fd.Name}` : '';
+  paragraph.className = nameStyle;
+  paragraph.dataset.fieldset = fd.Fieldset ? fd.Fieldset : '';
+  paragraph.textContent = fd.Label;
+  return paragraph;
 }
 
-function createImage(fd) {
-  const field = createFieldWrapper(fd);
-  const imagePath = fd.source || fd.properties['fd:repoPath'] || '';
-  const image = `
-  <picture>
-    <source srcset="${imagePath}?width=2000&optimize=medium" media="(min-width: 600px)">
-    <source srcset="${imagePath}?width=750&optimize=medium">
-    <img alt="${fd.altText || fd.name}" src="${imagePath}?width=750&optimize=medium">
-  </picture>`;
-  field.innerHTML = image;
-  return field;
-}
+const getId = (function getId() {
+  const ids = {};
+  return (name) => {
+    ids[name] = ids[name] || 0;
+    const idSuffix = ids[name] ? `-${ids[name]}` : '';
+    ids[name] += 1;
+    return `${name}${idSuffix}`;
+  };
+}());
 
 const fieldRenderers = {
-  'drop-down': createSelect,
-  'plain-text': createPlainText,
-  checkbox: createRadioOrCheckbox,
+  radio: createRadio,
+  checkbox: createRadio,
+  textarea: createTextArea,
+  select: createSelect,
   button: createButton,
-  multiline: createTextArea,
-  panel: createFieldSet,
-  radio: createRadioOrCheckbox,
-  'radio-group': createRadioOrCheckboxGroup,
-  'checkbox-group': createRadioOrCheckboxGroup,
-  image: createImage,
-  heading: createHeading,
+  submit: createSubmit,
+  output: createOutput,
+  hidden: createHidden,
+  fieldset: createFieldSet,
+  plaintext: createPlainText,
 };
-
-function colSpanDecorator(field, element) {
-  const colSpan = field['Column Span'] || field.properties?.colspan;
-  if (colSpan && element) {
-    element.classList.add(`col-${colSpan}`);
-  }
-}
-
-const handleFocus = (input, field) => {
-  const editValue = input.getAttribute('edit-value');
-  input.type = field.type;
-  input.value = editValue;
-};
-
-const handleFocusOut = (input) => {
-  const displayValue = input.getAttribute('display-value');
-  input.type = 'text';
-  input.value = displayValue;
-};
-
-function inputDecorator(field, element) {
-  const input = element?.querySelector('input,textarea,select');
-  if (input) {
-    input.id = field.id;
-    input.name = field.name;
-    if (field.tooltip) {
-      input.title = stripTags(field.tooltip, '');
-    }
-    input.readOnly = field.readOnly;
-    input.autocomplete = field.autoComplete ?? 'off';
-    input.disabled = field.enabled === false;
-    if (field.fieldType === 'drop-down' && field.readOnly) {
-      input.disabled = true;
-    }
-    const fieldType = getHTMLRenderType(field);
-    if (['number', 'date', 'text', 'email'].includes(fieldType) && (field.displayFormat || field.displayValueExpression)) {
-      field.type = fieldType;
-      input.setAttribute('edit-value', field.value ?? '');
-      input.setAttribute('display-value', field.displayValue ?? '');
-      input.type = 'text';
-      input.value = field.displayValue ?? '';
-      input.addEventListener('touchstart', () => { input.type = field.type; }); // in mobile devices the input type needs to be toggled before focus
-      input.addEventListener('focus', () => handleFocus(input, field));
-      input.addEventListener('blur', () => handleFocusOut(input));
-    } else if (input.type !== 'file') {
-      input.value = field.value ?? '';
-      if (input.type === 'radio' || input.type === 'checkbox') {
-        input.value = field?.enum?.[0] ?? 'on';
-        input.checked = field.value === input.value;
-      }
-    } else {
-      input.multiple = field.type === 'file[]';
-    }
-    if (field.required) {
-      input.setAttribute('required', 'required');
-    }
-    if (field.description) {
-      input.setAttribute('aria-describedby', `${field.id}-description`);
-    }
-    if (field.minItems) {
-      input.dataset.minItems = field.minItems;
-    }
-    if (field.maxItems) {
-      input.dataset.maxItems = field.maxItems;
-    }
-    if (field.maxFileSize) {
-      input.dataset.maxFileSize = field.maxFileSize;
-    }
-    if (field.default !== undefined) {
-      input.setAttribute('value', field.default);
-    }
-    if (input.type === 'email') {
-      input.pattern = emailPattern;
-    }
-    setConstraintsMessage(element, field.constraintMessages);
-    element.dataset.required = field.required;
-  }
-}
 
 function renderField(fd) {
-  const fieldType = fd?.fieldType?.replace('-input', '') ?? 'text';
-  const renderer = fieldRenderers[fieldType];
+  const renderer = fieldRenderers[fd.Type];
   let field;
   if (typeof renderer === 'function') {
     field = renderer(fd);
@@ -334,230 +311,75 @@ function renderField(fd) {
     field = createFieldWrapper(fd);
     field.append(createInput(fd));
   }
-  if (fd.description) {
+  if (fd.Description) {
     field.append(createHelpText(fd));
-    field.dataset.description = fd.description; // In case overriden by error message
-  }
-  if (fd.fieldType !== 'radio-group' && fd.fieldType !== 'checkbox-group' && fd.fieldType !== 'captcha') {
-    inputDecorator(fd, field);
   }
   return field;
 }
 
-export async function generateFormRendition(panel, container, getItems = (p) => p?.items) {
-  const items = getItems(panel) || [];
-  const promises = items.map(async (field) => {
-    field.value = field.value ?? '';
-    const { fieldType } = field;
-    if (fieldType === 'captcha') {
-      captchaField = field;
-      const element = createFieldWrapper(field);
-      element.textContent = 'CAPTCHA';
-      return element;
-    }
-    const element = renderField(field);
-    if (field.appliedCssClassNames) {
-      element.className += ` ${field.appliedCssClassNames}`;
-    }
-    colSpanDecorator(field, element);
-    if (field?.fieldType === 'panel') {
-      await generateFormRendition(field, element, getItems);
-      return element;
-    }
-    await componentDecorator(element, field, container);
-    return element;
-  });
-
-  const children = await Promise.all(promises);
-  container.append(...children.filter((_) => _ != null));
-  await componentDecorator(container, panel);
+function decorateFormFields(form) {
+  decorateFieldset(form);
 }
 
-function enableValidation(form) {
-  form.querySelectorAll('input,textarea,select').forEach((input) => {
-    input.addEventListener('invalid', (event) => {
-      checkValidation(event.target);
-    });
-  });
-
-  form.addEventListener('change', (event) => {
-    checkValidation(event.target);
-  });
+async function fetchData(url) {
+  const resp = await fetch(url);
+  const json = await resp.json();
+  return json.data.map((fd) => ({
+    ...fd,
+    Id: fd.Id || getId(fd.Name),
+    Value: fd.Value || '',
+  }));
 }
 
-async function createFormForAuthoring(formDef) {
-  const form = document.createElement('form');
-  await generateFormRendition(formDef, form, (container) => {
-    if (container[':itemsOrder'] && container[':items']) {
-      return container[':itemsOrder'].map((itemKey) => container[':items'][itemKey]);
-    }
-    return [];
-  });
-  return form;
-}
-
-export async function createForm(formDef, data) {
-  const { action: formPath } = formDef;
-  const form = document.createElement('form');
-  form.dataset.action = formPath;
-  form.noValidate = true;
-  if (formDef.appliedCssClassNames) {
-    form.className = formDef.appliedCssClassNames;
-  }
-  await generateFormRendition(formDef, form);
-
-  let captcha;
-  if (captchaField) {
-    let config = captchaField?.properties?.['fd:captcha']?.config;
-    if (!config) {
-      config = {
-        siteKey: captchaField?.value,
-        uri: captchaField?.uri,
-        version: captchaField?.version,
-      };
-    }
-    const pageName = getSitePageName(captchaField?.properties?.['fd:path']);
-    captcha = new GoogleReCaptcha(config, captchaField.id, captchaField.name, pageName);
-    captcha.loadCaptcha(form);
-  }
-
-  enableValidation(form);
-  transferRepeatableDOM(form);
-
-  if (afModule) {
-    window.setTimeout(async () => {
-      afModule.loadRuleEngine(formDef, form, captcha, generateFormRendition, data);
-    }, DELAY_MS);
-  }
-
-  form.addEventListener('reset', async () => {
-    const newForm = await createForm(formDef);
-    document.querySelector(`[data-action="${formDef.action}"]`).replaceWith(newForm);
-  });
-
-  form.addEventListener('submit', (e) => {
-    handleSubmit(e, form, captcha);
-  });
-
-  return form;
-}
-
-function isDocumentBasedForm(formDef) {
-  return formDef?.[':type'] === 'sheet' && formDef?.data;
-}
-
-function cleanUp(content) {
-  const formDef = content.replaceAll('^(([^<>()\\\\[\\\\]\\\\\\\\.,;:\\\\s@\\"]+(\\\\.[^<>()\\\\[\\\\]\\\\\\\\.,;:\\\\s@\\"]+)*)|(\\".+\\"))@((\\\\[[0-9]{1,3}\\\\.[0-9]{1,3}\\\\.[0-9]{1,3}\\\\.[0-9]{1,3}])|(([a-zA-Z\\\\-0-9]+\\\\.)\\+[a-zA-Z]{2,}))$', '');
-  return formDef?.replace(/\x83\n|\n|\s\s+/g, '');
-}
-/*
-  Newer Clean up - Replace backslashes that are not followed by valid json escape characters
-  function cleanUp(content) {
-    return content.replace(/\\/g, (match, offset, string) => {
-      const prevChar = string[offset - 1];
-      const nextChar = string[offset + 1];
-      const validEscapeChars = ['b', 'f', 'n', 'r', 't', '"', '\\'];
-      if (validEscapeChars.includes(nextChar) || prevChar === '\\') {
-        return match;
-      }
-      return '';
-    });
-  }
-*/
-
-function decode(rawContent) {
-  const content = rawContent.trim();
-  if (content.startsWith('"') && content.endsWith('"')) {
-    // In the new 'jsonString' context, Server side code comes as a string with escaped characters,
-    // hence the double parse
-    return JSON.parse(JSON.parse(content));
-  }
-  return JSON.parse(cleanUp(content));
-}
-
-function extractFormDefinition(block) {
-  let formDef;
-  const container = block.querySelector('pre');
-  const codeEl = container?.querySelector('code');
-  const content = codeEl?.textContent;
-  if (content) {
-    formDef = decode(content);
-  }
-  return { container, formDef };
-}
-
-export async function fetchForm(pathname) {
+async function fetchForm(pathname) {
   // get the main form
-  let data;
-  let path = pathname;
-  if (path.startsWith(window.location.origin) && !path.endsWith('.json')) {
-    if (path.endsWith('.html')) {
-      path = path.substring(0, path.lastIndexOf('.html'));
-    }
-    path += '/jcr:content/root/section/form.html';
-  }
-  let resp = await fetch(path);
-
-  if (resp?.headers?.get('Content-Type')?.includes('application/json')) {
-    data = await resp.json();
-  } else if (resp?.headers?.get('Content-Type')?.includes('text/html')) {
-    resp = await fetch(path);
-    data = await resp.text().then((html) => {
-      try {
-        const doc = new DOMParser().parseFromString(html, 'text/html');
-        if (doc) {
-          return extractFormDefinition(doc.body).formDef;
-        }
-        return doc;
-      } catch (e) {
-        console.error('Unable to fetch form definition for path', pathname, path);
-        return null;
-      }
-    });
-  }
-  return data;
+  const jsonData = await fetchData(pathname);
+  return jsonData;
 }
 
-export default async function decorate(block) {
-  let container = block.querySelector('a[href]');
-  let formDef;
-  let pathname;
-  if (container) {
-    ({ pathname } = new URL(container.href));
-    formDef = await fetchForm(container.href);
-  } else {
-    ({ container, formDef } = extractFormDefinition(block));
-  }
-  let source = 'aem';
-  let rules = true;
-  let form;
-  if (formDef) {
-    formDef.action = getSubmitBaseUrl() + (formDef.action || '');
-    if (isDocumentBasedForm(formDef)) {
-      const transform = new DocBasedFormToAF();
-      formDef = transform.transform(formDef);
-      source = 'sheet';
-      form = await createForm(formDef);
-      const docRuleEngine = await import('./rules-doc/index.js');
-      docRuleEngine.default(formDef, form);
-      rules = false;
-    } else {
-      afModule = await import('./rules/index.js');
-      if (afModule && afModule.initAdaptiveForm && !block.classList.contains('edit-mode')) {
-        form = await afModule.initAdaptiveForm(formDef, createForm);
-      } else {
-        form = await createFormForAuthoring(formDef);
+async function createForm(formURL) {
+  const { pathname } = new URL(formURL);
+  const data = await fetchForm(pathname);
+  const form = document.createElement('form');
+  data.forEach((fd) => {
+    const el = renderField(fd);
+    const input = el.querySelector('input,textarea,select');
+    if (fd.Mandatory && fd.Mandatory.toLowerCase() === 'true') {
+      input.setAttribute('required', 'required');
+    }
+    if (input) {
+      input.id = fd.Id;
+      input.name = fd.Name;
+      input.value = fd.Value;
+      if (fd.Description) {
+        input.setAttribute('aria-describedby', `${fd.Id}-description`);
       }
     }
-    form.dataset.redirectUrl = formDef.redirectUrl || '';
-    form.dataset.thankYouMsg = formDef.thankYouMsg || '';
-    form.dataset.action = formDef.action || pathname?.split('.json')[0];
-    form.dataset.source = source;
-    form.dataset.rules = rules;
-    form.dataset.id = formDef.id;
-    if (source === 'aem' && formDef.properties) {
-      form.dataset.formpath = formDef.properties['fd:path'];
-    }
-    container.replaceWith(form);
+    form.append(el);
+  });
+  groupFieldsByFieldSet(form);
+  // eslint-disable-next-line prefer-destructuring
+  form.dataset.action = pathname.split('.json')[0];
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    e.submitter.setAttribute('disabled', '');
+    handleSubmit(form);
+  });
+  decorateFormFields(form);
+  addActiveClassToFirstFieldset(form);
+  return form;
+}
+//new function for adding active class to the first fieldset
+function addActiveClassToFirstFieldset(form) {
+  const firstfieldset = form.querySelector('fieldset');
+  if (firstfieldset) {
+    firstfieldset.classList.add('active');
+  }
+}
+export default async function decorate(block) {
+  const formLink = block.querySelector('a[href$=".json"]');
+  if (formLink) {
+    const form = await createForm(formLink.href);
+    formLink.replaceWith(form);
   }
 }
